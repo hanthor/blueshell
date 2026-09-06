@@ -37,6 +37,15 @@ flatpak install tuna-os org.tunaos.BlueShell
 Updates then arrive through normal `flatpak update`. The app is listed on
 [tunaos.org](https://tunaos.org/) alongside the other TunaOS apps.
 
+The same remote also carries **unmodified upstream Ghostty**, rebuilt
+daily from `ghostty-org/ghostty:main`, for anyone who wants the vanilla
+terminal (or wants both side by side — the app IDs differ, so they
+coexist):
+
+```sh
+flatpak install tuna-os com.mitchellh.ghostty
+```
+
 ### Flatpak — one-line install (nightly bundle)
 
 CI builds a fresh Flatpak bundle on every commit to `ptyxis-port`. Install the latest:

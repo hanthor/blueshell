@@ -92,6 +92,29 @@ flatpak remote-add --if-not-exists tuna-os https://tunaos.org/flatpak/tuna-os.fl
 flatpak install tuna-os org.tunaos.BlueShell
 ```
 
+## 3b. Upstream Ghostty in the same remote
+
+The remote also carries stock upstream Ghostty
+(`com.mitchellh.ghostty`), published by
+`.github/workflows/publish-ghostty-flatpak.yml`. It reuses the step-3
+pipeline verbatim — same native per-arch OCI builds, same skopeo push,
+same `update-index.py` against `tuna-os/docs` — with three differences:
+
+- The app is built from a checkout of `ghostty-org/ghostty` using
+  **upstream's own** manifest and `zig-packages.json`, so nothing about
+  it is maintained in this repo and upstream dependency/runtime bumps
+  need no action here.
+- It runs on a daily cron (05:00 UTC) rather than on push, and
+  short-circuits when the resolved upstream commit already has a
+  `sha-<short>-x86_64` tag on `ghcr.io/tuna-os/ghostty`.
+- The GHCR repo is `ghcr.io/tuna-os/ghostty`, so it needs its own index
+  `Results` entry — `update-index.py` adds it on first run; the package
+  itself must be made **public** in the org's package settings once, the
+  same one-time step `blueshell` needs.
+
+Because the app IDs differ, a user can install BlueShell and upstream
+Ghostty side by side from the one remote.
+
 ## 4. tunaos.org site listing + install instructions
 
 Being installable is not the finish line — the app must be discoverable:
@@ -127,5 +150,7 @@ Being installable is not the finish line — the app must be discoverable:
 - [ ] Fresh-machine install from the remote verified (`flatpak install tuna-os org.tunaos.BlueShell`)
 - [ ] README install section switched to the remote as the primary path (nightly.link bundle stays as the "bleeding edge" alternative)
 - [ ] tunaos.org apps page lists BlueShell with install command + screenshot (PR to `tuna-os/docs`)
-- [ ] `upstream-sync.yml` weekly run confirmed working under the org (issue/PR creation permissions)
+- [ ] `upstream-sync.yml` daily run confirmed working under the org (issue/PR creation permissions)
+- [ ] `publish-ghostty-flatpak` run pushed an image to `ghcr.io/tuna-os/ghostty`, package set public, and the index entry landed in `tuna-os/docs`
+- [ ] Fresh-machine install of upstream Ghostty from the remote verified (`flatpak install tuna-os com.mitchellh.ghostty`)
 - [ ] Old repo redirect verified; announce the move in tunaOS channels

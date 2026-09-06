@@ -1,6 +1,6 @@
 name: upstream-sync
 
-# Attempts a weekly rebase of ptyxis-port onto ghostty-org/ghostty:main.
+# Attempts a daily rebase of ptyxis-port onto ghostty-org/ghostty:main.
 #
 # - Clean rebase  → push a sync branch + open a PR
 # - Conflicts     → open an issue with the conflicted files + upstream
@@ -11,8 +11,12 @@ name: upstream-sync
 
 on:
   schedule:
-    # Mondays 09:00 UTC
-    - cron: '0 9 * * 1'
+    # Daily 07:00 UTC. Daily (not weekly) so each sync PR carries a day
+    # of upstream rather than a week: smaller diffs conflict less often,
+    # and when they do the blast radius is one day of upstream commits.
+    # Runs after publish-ghostty-flatpak (05:00 UTC) so the two don't
+    # contend for runners.
+    - cron: '0 7 * * *'
   workflow_dispatch:
 
 permissions:
@@ -66,12 +70,28 @@ jobs:
 
       - name: Short-circuit if already up to date
         id: uptodate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "$(git rev-parse HEAD)" = "${{ steps.meta.outputs.upstream_sha }}" ]; then
+          if git merge-base --is-ancestor \
+               "${{ steps.meta.outputs.upstream_sha }}" HEAD; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ptyxis-port already contains upstream ${{ steps.meta.outputs.upstream_short }}."
+            exit 0
           fi
+          # On a daily cadence the previous day's sync is often still
+          # open. Re-running would push a second branch and a second PR
+          # for an overlapping range, so hold until the operator has
+          # dealt with the one in flight.
+          open_sync=$(gh pr list --state open --base ptyxis-port \
+            --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("upstream-sync/"))] | length')
+          if [ "${open_sync}" != "0" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::An upstream-sync PR is already open — skipping today's rebase. Merge or close it to resume."
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Attempt rebase
         id: rebase
@@ -105,7 +125,7 @@ jobs:
             --head "${{ steps.meta.outputs.branch }}" \
             --title "chore: rebase onto upstream ${{ steps.meta.outputs.upstream_short }}" \
             --body "$(cat <<EOF
-          Automated weekly rebase of \`ptyxis-port\` onto \`ghostty-org/ghostty:main\`.
+          Automated daily rebase of \`ptyxis-port\` onto \`ghostty-org/ghostty:main\`.
 
           - Upstream HEAD: \`${{ steps.meta.outputs.upstream_sha }}\`
           - Upstream commits since last base: ${{ steps.meta.outputs.range_count }}
@@ -166,5 +186,5 @@ jobs:
           echo "## upstream-sync result" >> "$GITHUB_STEP_SUMMARY"
           echo "- date: ${{ steps.meta.outputs.date }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- upstream: ${{ steps.meta.outputs.upstream_short }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- already up to date: ${{ steps.uptodate.outputs.skip }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- skipped (up to date or sync PR already open): ${{ steps.uptodate.outputs.skip }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- clean rebase: ${{ steps.rebase.outputs.clean }}" >> "$GITHUB_STEP_SUMMARY"

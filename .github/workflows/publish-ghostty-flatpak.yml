@@ -1,0 +1,285 @@
+name: Publish Ghostty Flatpak
+
+# Build *upstream* Ghostty (com.mitchellh.ghostty) as a Flatpak OCI image
+# for x86_64 and aarch64, push both to GHCR, and register them in the
+# TunaOS Flatpak index (tunaos.org/flatpak) so
+# `flatpak install tuna-os com.mitchellh.ghostty` serves current builds.
+#
+# This is the unmodified upstream terminal, published alongside BlueShell
+# — not a fork build. Nothing in this repo's tree is used for the app:
+# we check out ghostty-org/ghostty at the requested ref and build with
+# *upstream's own* manifest (`flatpak/com.mitchellh.ghostty.yml`) and
+# *upstream's own* `zig-packages.json`. That is what keeps this in sync
+# with upstream by construction — there is no manifest to maintain here,
+# so a dependency bump or runtime bump upstream is picked up by the next
+# daily run automatically.
+#
+# The publish half (native runner per arch, no QEMU; skopeo with a
+# writable auth file; vendored update-index.py against tuna-os/docs)
+# is the same pipeline as publish-flatpak.yml.
+
+on:
+  schedule:
+    # Daily 05:00 UTC — a couple of hours ahead of the upstream-sync
+    # rebase so the two runs don't contend for runners.
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream ghostty-org/ghostty ref to build (branch, tag or SHA)'
+        required: false
+        default: main
+        type: string
+      force:
+        description: 'Rebuild even if this upstream commit was already published'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-ghostty-flatpak
+  cancel-in-progress: false
+
+env:
+  APP_ID: com.mitchellh.ghostty
+  UPSTREAM_REPO: ghostty-org/ghostty
+  # ghcr.io/<owner>/ghostty — tuna-os in the org repo, the fork owner
+  # otherwise (GITHUB_TOKEN can only write its own namespace).
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ghostty
+
+jobs:
+  # Resolve what to build and decide whether it is worth building. A
+  # daily cron against an unchanged upstream should cost seconds, not a
+  # pair of full Zig builds.
+  check:
+    name: Resolve upstream
+    # Scheduled publishes only from the tuna-os org repo; manual dispatch
+    # works from anywhere (the image then goes to the dispatching owner's
+    # ghcr namespace instead).
+    if: github.repository == 'tuna-os/blueshell' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      short: ${{ steps.resolve.outputs.short }}
+      gnome: ${{ steps.runtime.outputs.gnome }}
+      build: ${{ steps.published.outputs.build }}
+    steps:
+      - name: Checkout (scripts only)
+        uses: actions/checkout@v7
+
+      - name: Resolve upstream commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ inputs.ref || 'main' }}
+        run: |
+          sha=$(gh api "repos/${UPSTREAM_REPO}/commits/${REF}" --jq .sha)
+          echo "sha=${sha}"            >> "$GITHUB_OUTPUT"
+          echo "short=${sha:0:12}"     >> "$GITHUB_OUTPUT"
+          echo "Upstream ${REF} is ${sha}"
+
+      # The Flatpak SDK image has to be chosen before checkout, so read
+      # the runtime version straight out of upstream's manifest at that
+      # commit. Fall back to the newest image we know exists if upstream
+      # has moved to a runtime the builder images don't carry yet.
+      - name: Resolve builder image
+        id: runtime
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          FALLBACK_GNOME: '50'
+        run: |
+          . .github/scripts/ghcr-lib.sh
+          manifest="https://raw.githubusercontent.com/${UPSTREAM_REPO}/${SHA}/flatpak/com.mitchellh.ghostty.yml"
+          want=$(curl -fsSL "$manifest" \
+            | sed -n 's/^runtime-version:[[:space:]]*"\{0,1\}\([0-9]\+\)"\{0,1\}[[:space:]]*$/\1/p' \
+            | head -1)
+          if [ -z "$want" ]; then
+            echo "::warning::Could not read runtime-version from upstream manifest; falling back to gnome-${FALLBACK_GNOME}."
+            want="$FALLBACK_GNOME"
+          fi
+          if ghcr_tag_exists flathub-infra/flatpak-github-actions "gnome-${want}"; then
+            echo "gnome=${want}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No flatpak-github-actions:gnome-${want} image yet; falling back to gnome-${FALLBACK_GNOME}. The build may fail until that image is published."
+            echo "gnome=${FALLBACK_GNOME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if already published
+        id: published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHORT: ${{ steps.resolve.outputs.short }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          . .github/scripts/ghcr-lib.sh
+          if [ "$FORCE" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Forced rebuild requested."
+            exit 0
+          fi
+          repo="${IMAGE#ghcr.io/}"
+          # Both arches are pushed in the same job, so the x86_64 tag
+          # existing means the whole publish for this commit succeeded.
+          if ghcr_tag_exists "$repo" "sha-${SHORT}-x86_64"; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${IMAGE}:sha-${SHORT}-x86_64 already published — nothing to do."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-oci:
+    name: Build OCI — ${{ matrix.arch }}
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-${{ needs.check.outputs.gnome }}
+      options: --privileged
+    steps:
+      # Upstream's manifest sources `type: dir, path: ..`, i.e. the repo
+      # root next to `flatpak/`, so the checkout path is what decides
+      # what gets built. Full depth: `zig build` derives the version
+      # string from git describe.
+      - name: Checkout upstream ghostty
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.check.outputs.sha }}
+          path: upstream
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: upstream/flatpak/com.mitchellh.ghostty.yml
+          cache-key: flatpak-ghostty-${{ needs.check.outputs.sha }}-${{ matrix.arch }}
+          bundle: ghostty-${{ matrix.arch }}.flatpak
+          upload-artifact: false
+          arch: ${{ matrix.arch }}
+
+      - name: Export OCI
+        run: |
+          flatpak build-bundle --oci --arch=${{ matrix.arch }} \
+            repo ghostty-${{ matrix.arch }}.oci "$APP_ID"
+
+      - name: Upload OCI artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ghostty-${{ matrix.arch }}-oci
+          path: ghostty-${{ matrix.arch }}.oci/
+          retention-days: 1
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ghostty-${{ matrix.arch }}-bundle
+          path: ghostty-${{ matrix.arch }}.flatpak
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: [check, build-oci]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ghostty-x86_64-oci
+          # upload-artifact flattens a single-directory `path` to the artifact
+          # root, so each arch must download into its own subdirectory.
+          path: ghostty-x86_64.oci
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ghostty-aarch64-oci
+          path: ghostty-aarch64.oci
+
+      - name: Push OCI to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_AUTH_FILE: ${{ runner.temp }}/auth.json
+          SHORT: ${{ needs.check.outputs.short }}
+        run: |
+          echo "${{ env.GITHUB_TOKEN }}" \
+            | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for arch in x86_64 aarch64; do
+            skopeo copy "oci:ghostty-${arch}.oci" \
+              "docker://${IMAGE}:latest-${arch}"
+            # Immutable per-commit tag — this is what the `check` job
+            # reads to decide whether a daily run has work to do.
+            skopeo copy "oci:ghostty-${arch}.oci" \
+              "docker://${IMAGE}:sha-${SHORT}-${arch}"
+          done
+
+      - name: Generate index snippet (always)
+        run: |
+          for arch in x86_64 aarch64; do
+            python3 .github/scripts/update-index.py \
+              --oci-dir "ghostty-${arch}.oci" \
+              --index-file ghostty-index-snippet.json \
+              --repo-name "${{ github.repository_owner }}/ghostty" \
+              --tags latest
+          done
+          cat ghostty-index-snippet.json
+
+      - name: Upload index snippet
+        uses: actions/upload-artifact@v7
+        with:
+          name: ghostty-index-snippet
+          path: ghostty-index-snippet.json
+          retention-days: 30
+
+      - name: Update central index (tuna-os/docs)
+        env:
+          FLATPAK_INDEX_TOKEN: ${{ secrets.FLATPAK_INDEX_TOKEN }}
+          SHORT: ${{ needs.check.outputs.short }}
+        run: |
+          if [ -z "$FLATPAK_INDEX_TOKEN" ]; then
+            echo "::notice::FLATPAK_INDEX_TOKEN not set — skipping tuna-os/docs index update."
+            echo "::notice::To publish into the remote: add a PAT with push access to tuna-os/docs as FLATPAK_INDEX_TOKEN and re-run, or merge the ghostty-index-snippet artifact's Results entry into tuna-os/docs:static/flatpak/index/static manually."
+            exit 0
+          fi
+          git clone --depth 1 \
+            https://github.com/tuna-os/docs.git \
+            index-repo
+          # Header-based auth so the token never lands in the remote URL.
+          git -C index-repo config --local http.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FLATPAK_INDEX_TOKEN" | base64)"
+          for arch in x86_64 aarch64; do
+            python3 .github/scripts/update-index.py \
+              --oci-dir "ghostty-${arch}.oci" \
+              --index-file index-repo/static/flatpak/index/static \
+              --repo-name "${{ github.repository_owner }}/ghostty" \
+              --tags latest
+          done
+          cd index-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add static/flatpak/index/static
+          if git diff --cached --quiet; then
+            echo "No index changes"
+          else
+            git commit -m "chore(flatpak): update ghostty OCI index to ${SHORT} (x86_64 + aarch64)"
+            git push origin main
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Ghostty Flatpak publish"
+            echo "- upstream: \`${{ needs.check.outputs.sha }}\`"
+            echo "- image: \`${IMAGE}:latest-{x86_64,aarch64}\`"
+            echo "- pinned: \`${IMAGE}:sha-${{ needs.check.outputs.short }}-{x86_64,aarch64}\`"
+            echo "- runtime: \`org.gnome.Platform//${{ needs.check.outputs.gnome }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
