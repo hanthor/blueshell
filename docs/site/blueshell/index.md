@@ -5,6 +5,12 @@ sidebar_label: "BlueShell"
 status: unknown
 ---
 
+<!-- Historical draft. The published tunaos.org page now lives in
+     tuna-os/docs at docs/blueshell/index.md and has moved on from this
+     copy — it is hand-authored there and protected from the org README
+     sync. Edit that one; this file is kept only as the original draft.
+     See ../TUNA_OS_PROMOTION.md section 4. -->
+
 **A container-native terminal for GNOME — the Ghostty engine with the Ptyxis experience**
 
 BlueShell is a fork of [Ghostty](https://ghostty.org) with

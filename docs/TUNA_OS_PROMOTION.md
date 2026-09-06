@@ -1,9 +1,8 @@
 # Promoting BlueShell to the tuna-os org + Flatpak remote
 
-Goal: ship BlueShell (now at `tuna-os/blueshell` — **transfer done
-2026-08-17**) through the TunaOS Flatpak remote (`https://tunaos.org/flatpak/`,
-OCI images on `ghcr.io/tuna-os/*`, index maintained in `tuna-os/docs`
-and served via Cloudflare Pages).
+Goal: ship BlueShell through the TunaOS Flatpak remote
+(`https://tunaos.org/flatpak/`, OCI images on `ghcr.io/tuna-os/*`, index
+maintained in `tuna-os/docs` and served via Cloudflare Pages).
 
 Repo-side groundwork in this tree is done:
 `.github/workflows/publish-flatpak.yml` is committed and self-gates on
@@ -11,7 +10,23 @@ Repo-side groundwork in this tree is done:
 transfer — nothing here blocks on the org. The remaining steps need
 org permissions and are listed in order.
 
-## 1. Transfer the repository — ✅ DONE (2026-08-17)
+> **Status 2026-09-06: the transfer has NOT happened.** This document
+> previously recorded step 1 as done on 2026-08-17; it is not. The repo
+> is still `hanthor/blueshell`, which is why nothing has ever been
+> published:
+>
+> - `publish-flatpak.yml` self-gates on
+>   `github.repository == 'tuna-os/blueshell'`, so the job is skipped on
+>   every push to `ptyxis-port`.
+> - `org.tunaos.BlueShell` is absent from
+>   `tuna-os/docs:static/flatpak/index/static`, so
+>   `flatpak install tuna-os org.tunaos.BlueShell` fails with
+>   "Nothing matches" — the remote is fine, the app was never added.
+>
+> Step 1 is the gate on everything below. Nothing publishes until it is
+> real.
+
+## 1. Transfer the repository — ⛔ NOT DONE
 
 GitHub → repo **Settings → General → Danger Zone → Transfer ownership**
 → `tuna-os`. (Org owner must accept; hanthor needs create-repo rights
@@ -27,7 +42,17 @@ After transfer, in the new repo:
 - Confirm Actions are enabled and `GITHUB_TOKEN` has `packages: write`
   (the publish workflow requests it, ghcr push needs it).
 - Update the repo description/topics; keep the `upstream-sync` label
-  (the weekly sync workflow creates issues with it).
+  (the daily sync workflow creates issues with it).
+
+Two things are easy to miss here, and both are hard blockers:
+
+- **`FLATPAK_INDEX_TOKEN` really is required.** Without it the publish
+  job still builds and pushes the OCI images to GHCR, then skips the
+  index update with a notice. The app never appears in the remote, so
+  `flatpak install` keeps failing even though the run is green.
+- **Make the GHCR packages public** after the first push
+  (`ghcr.io/tuna-os/blueshell` and `ghcr.io/tuna-os/ghostty`). A private
+  package is invisible to `flatpak`, with the same symptom.
 
 ## 2. Rename the app ID: `dev.hanthor.BlueShell` → `org.tunaos.BlueShell` — ✅ DONE
 
@@ -119,38 +144,77 @@ Ghostty side by side from the one remote.
 
 Being installable is not the finish line — the app must be discoverable:
 
-1. **tunaos.org listing**: the site is a Docusaurus build from
-   `tuna-os/docs` with one `docs/<app>/index.md` page per app. A
-   ready-to-copy BlueShell page in the finupdate page's format lives at
-   [`docs/site/blueshell/index.md`](site/blueshell/index.md) in this
-   repo — PR it to `tuna-os/docs:docs/blueshell/index.md` (add a
-   `sidebars.ts` entry if pages aren't auto-discovered). Short blurb if
-   an apps-overview list also needs a row:
+1. **tunaos.org listing** — site changes are written and waiting in a
+   PR against `tuna-os/docs`. The site is a Docusaurus build from that
+   repo, and an app is listed in more places than the one page this
+   document originally described:
 
-   > **BlueShell** — container-native terminal for GNOME. Ptyxis's
-   > container-first UX (Toolbox / Distrobox / Podman tabs, profiles,
-   > preferences) powered by the Ghostty rendering engine (GPU
-   > acceleration, Kitty graphics, ligatures, splits).
-   >
-   > `flatpak install tuna-os org.tunaos.BlueShell`
+   - `src/data/projects.ts` — the entry that drives the `/projects`
+     card, the `/<app>` landing page, and `/install?app=<id>`.
+   - `src/pages/<app>.tsx` — a thin wrapper over `ProjectLanding`.
+   - `docs/<app>/index.md` — the reference page.
+   - `sidebars.ts` — the entry under **Apps**.
+   - `src/pages/flatpak.tsx` and `docs/flatpak/index.mdx` — both
+     install catalogs.
 
-   Include a screenshot from the CI `ui-walkthrough` artifact
-   (`02-prefs-appearance.png` shows the app best) and a link back to
-   `tuna-os/blueshell`.
+   The PR covers BlueShell and Ghostty in all of the above. One trap it
+   had to handle: `tuna-os/docs` runs `sync-org-docs.mjs`, which
+   overwrites `docs/<slug>/` from each org repo's README
+   unconditionally. `docs/blueshell/` was already such a tree. The PR
+   adds both slugs to that script's `HAND_AUTHORED` set, without which
+   the next sync replaces the page.
+
+   `docs/site/blueshell/index.md` in this repo was the original draft
+   for that page. The published copy now lives in `tuna-os/docs` and has
+   moved on from it, so treat that file as history rather than a source
+   to re-copy.
+
+   Still worth adding once the app is live: a screenshot from the CI
+   `ui-walkthrough` artifact (`02-prefs-appearance.png` shows the app
+   best).
 
 2. **README install instructions**: the README's "TunaOS Flatpak
    remote" section is already written (currently marked as pending
    promotion) — remove the "available once…" note and promote it to
    the recommended install path in the same PR that flips the app ID.
 
-## 5. Post-promotion checklist
+## 5. Publish runbook
 
-- [ ] `ptyxis-tests` and `ghostty-ptyxis` (bundle) workflows green in the org repo
-- [ ] `publish-flatpak` run pushed an image to `ghcr.io/tuna-os/blueshell` and the index PR/commit landed in `tuna-os/docs`
-- [ ] Fresh-machine install from the remote verified (`flatpak install tuna-os org.tunaos.BlueShell`)
-- [ ] README install section switched to the remote as the primary path (nightly.link bundle stays as the "bleeding edge" alternative)
-- [ ] tunaos.org apps page lists BlueShell with install command + screenshot (PR to `tuna-os/docs`)
-- [ ] `upstream-sync.yml` daily run confirmed working under the org (issue/PR creation permissions)
-- [ ] `publish-ghostty-flatpak` run pushed an image to `ghcr.io/tuna-os/ghostty`, package set public, and the index entry landed in `tuna-os/docs`
-- [ ] Fresh-machine install of upstream Ghostty from the remote verified (`flatpak install tuna-os com.mitchellh.ghostty`)
-- [ ] Old repo redirect verified; announce the move in tunaOS channels
+The order matters: each step below is a hard prerequisite for the next,
+and step 1 gates everything.
+
+1. [ ] **Transfer the repo** to `tuna-os` (section 1). Until this
+       happens every publish job self-skips and nothing reaches the
+       remote.
+2. [ ] **Set `FLATPAK_INDEX_TOKEN`** on the new repo — a PAT with push
+       access to `tuna-os/docs`. Secrets do not survive a transfer. A
+       run without it is green but publishes nothing to the index.
+3. [ ] **Publish BlueShell.** Any push to `ptyxis-port` now triggers
+       `publish-flatpak`; a `workflow_dispatch` does the same on
+       demand.
+4. [ ] **Publish Ghostty.** `publish-ghostty-flatpak` runs daily at
+       05:00 UTC; dispatch it to avoid the wait.
+5. [ ] **Make both GHCR packages public** —
+       `ghcr.io/tuna-os/blueshell` and `ghcr.io/tuna-os/ghostty`. A
+       private package fails to install exactly like a missing one.
+6. [ ] **Confirm the index entries** landed in
+       `tuna-os/docs:static/flatpak/index/static` (each publish job
+       commits its own).
+7. [ ] **Verify from a clean machine**:
+       `flatpak install tuna-os org.tunaos.BlueShell` and
+       `flatpak install tuna-os com.mitchellh.ghostty`.
+8. [ ] **Merge the site PR** against `tuna-os/docs` (section 4). Do this
+       after step 7: the pages present both install commands as working.
+9. [ ] **Add both apps to `expected-apps.json`** in `tuna-os/docs`, with
+       `archs: ["amd64", "arm64"]`. Deliberately not in the site PR:
+       `check-flatpak-remote.py` fails on an app listed there but absent
+       from the index, and `flatpak-sanity.yml` runs on every PR that
+       touches `static/flatpak/**`. Once step 6 is real, this addition
+       turns a standing warning into a check.
+10. [ ] **README**: drop the "available once the promotion lands" note
+        and make the remote the primary install path.
+11. [ ] **Confirm the daily jobs** under the org: `upstream-sync.yml`
+        can open issues and PRs, and `publish-ghostty-flatpak` finds its
+        `sha-` tag and short-circuits on the second day.
+12. [ ] Old repo redirect verified; announce the move in tunaOS
+        channels.
