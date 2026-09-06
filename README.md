@@ -31,6 +31,14 @@ flatpak remote-add --if-not-exists tuna-os https://tunaos.org/flatpak/tuna-os.fl
 flatpak install tuna-os org.tunaos.BlueShell
 ```
 
+The same remote also carries **unmodified upstream Ghostty**, rebuilt
+daily from `ghostty-org/ghostty:main`, for anyone who wants the vanilla
+terminal. The app IDs differ, so the two coexist:
+
+```sh
+flatpak install tuna-os com.mitchellh.ghostty
+```
+
 Updates then arrive through normal `flatpak update`. Both x86_64 and aarch64
 are published, and every commit to `ptyxis-port` refreshes the remote. The app
 is listed on [tunaos.org](https://tunaos.org/) alongside the other TunaOS apps.

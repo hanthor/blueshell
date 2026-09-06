@@ -92,6 +92,43 @@ flatpak remote-add --if-not-exists tuna-os https://tunaos.org/flatpak/tuna-os.fl
 flatpak install tuna-os org.tunaos.BlueShell
 ```
 
+## 3b. Upstream Ghostty in the same remote
+
+The remote also carries stock upstream Ghostty
+(`com.mitchellh.ghostty`), published by
+`.github/workflows/publish-ghostty-flatpak.yml`. It reuses the step-3
+pipeline verbatim — same native per-arch OCI builds, same skopeo push,
+same `update-index.py` against `tuna-os/docs` — with three differences:
+
+- The app is built from a checkout of `ghostty-org/ghostty` using
+  **upstream's own** manifest and `zig-packages.json`, so nothing about
+  it is maintained in this repo and upstream dependency or runtime bumps
+  need no action here.
+- It runs on a daily cron (05:00 UTC) rather than on push, and
+  short-circuits when the resolved upstream commit already has a
+  `sha-<short>-x86_64` tag on `ghcr.io/tuna-os/ghostty`.
+- The GHCR repo is `ghcr.io/tuna-os/ghostty`, so it needs its own index
+  `Results` entry, and the package must be made **public** once in the
+  org's package settings — the same one-time step `blueshell` needed.
+
+Because the app IDs differ, a user can install BlueShell and upstream
+Ghostty side by side from the one remote.
+
+## 3c. Two ways a green publish still fails to install
+
+Both have bitten this app, and neither shows up as a red run:
+
+- **`FLATPAK_INDEX_TOKEN` unset.** The job builds, pushes both OCI
+  images to GHCR, then skips the `tuna-os/docs` index update with a
+  `::notice::` and exits green. The images are real and public, the app
+  is simply absent from `index/static`, and `flatpak install` answers
+  "Nothing matches". Verify after any publish that the app appears in
+  `tuna-os/docs:static/flatpak/index/static`, not just that the run
+  was green. The run also uploads a `*-index-snippet` artifact for
+  exactly this case: its `Results` entry can be merged into the index by
+  hand.
+- **The GHCR package left private.** Same symptom, different cause.
+
 ## 4. tunaos.org site listing + install instructions
 
 Being installable is not the finish line — the app must be discoverable:
